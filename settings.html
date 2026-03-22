@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d0d0d;
+      --surface:   #161616;
+      --border:    #2a2a2a;
+      --accent:    #c9a84c;
+      --accent-dim:#7a6028;
+      --text:      #e8e8e8;
+      --muted:     #666;
+      --danger:    #c0392b;
+      --success:   #27ae60;
+      --radius:    6px;
+    }
+
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 14px;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .window {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 20px 24px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+      transition: background 0.3s;
+    }
+
+    .brand-dot.running { background: var(--success); }
+
+    .brand-name {
+      font-family: 'DM Mono', monospace;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .server-status {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+    }
+
+    /* ── Scrollable content ── */
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .content::-webkit-scrollbar { width: 4px; }
+    .content::-webkit-scrollbar-track { background: transparent; }
+    .content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* ── Section ── */
+    .section { display: flex; flex-direction: column; gap: 12px; }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ── Row ── */
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .row-label {
+      font-size: 13px;
+      color: var(--text);
+      flex: 0 0 auto;
+      min-width: 120px;
+    }
+
+    .row-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .row-label-stack { display: flex; flex-direction: column; }
+
+    /* ── Directory picker ── */
+    .dir-picker {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .dir-path {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 7px 10px;
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: default;
+      min-width: 0;
+    }
+
+    .btn-pick {
+      flex-shrink: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 12px;
+      padding: 7px 12px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+
+    .btn-pick:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Toggle ── */
+    .toggle {
+      position: relative;
+      width: 42px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .toggle input { opacity: 0; width: 0; height: 0; }
+
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border-radius: 24px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .toggle-slider::before {
+      content: "";
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      left: 3px;
+      top: 3px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+
+    .toggle input:checked + .toggle-slider { background: var(--accent-dim); }
+    .toggle input:checked + .toggle-slider::before {
+      transform: translateX(18px);
+      background: var(--accent);
+    }
+
+    /* ── Text input ── */
+    .text-input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 7px 10px;
+      font-family: 'DM Mono', monospace;
+      font-size: 12px;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .text-input:focus { border-color: var(--accent); }
+    .text-input::placeholder { color: var(--muted); }
+
+    /* ── Number input ── */
+    .num-input {
+      width: 80px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 7px 10px;
+      font-family: 'DM Mono', monospace;
+      font-size: 12px;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s;
+      text-align: right;
+    }
+
+    .num-input:focus { border-color: var(--accent); }
+
+    /* ── Footer ── */
+    footer {
+      padding: 16px 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .btn {
+      border-radius: var(--radius);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 9px 20px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+      border-color: var(--accent);
+    }
+
+    .btn-primary:hover { background: #e0b85a; border-color: #e0b85a; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--border);
+    }
+
+    .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
+
+    .btn-danger {
+      background: transparent;
+      color: var(--danger);
+      border-color: var(--danger);
+    }
+
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+
+    .save-msg {
+      font-size: 12px;
+      color: var(--success);
+      font-family: 'DM Mono', monospace;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .save-msg.visible { opacity: 1; }
+
+    /* ── Cloud conditional ── */
+    .cloud-row {
+      display: none;
+    }
+
+    .cloud-row.visible { display: flex; }
+  </style>
+</head>
+<body>
+  <div class="window">
+
+    <header>
+      <div class="brand">
+        <div class="brand-dot" id="statusDot"></div>
+        <span class="brand-name">Code Collector</span>
+      </div>
+      <span class="server-status" id="serverStatusText">checking…</span>
+    </header>
+
+    <div class="content">
+
+      <!-- ── Save Locations ── -->
+      <div class="section">
+        <div class="section-label">Save Locations</div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Primary</span>
+            <span class="row-sub">Every capture goes here</span>
+          </div>
+          <div class="dir-picker">
+            <div class="dir-path" id="primaryPath">—</div>
+            <button class="btn-pick" id="pickPrimary">Browse…</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Archive</span>
+            <span class="row-sub">Duplicate for backup</span>
+          </div>
+          <div class="dir-picker">
+            <div class="dir-path" id="archivePath">—</div>
+            <button class="btn-pick" id="pickArchive">Browse…</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Save to archive</span>
+            <span class="row-sub">Also write every capture to archive folder</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="saveToArchive" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- ── Cloud Sync ── -->
+      <div class="section">
+        <div class="section-label">Cloud Sync</div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Enable cloud sync</span>
+            <span class="row-sub">Write to a cloud-synced folder (Drive, Dropbox, etc.)</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="cloudEnabled" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div class="row cloud-row" id="cloudDirRow">
+          <div class="row-label-stack">
+            <span class="row-label">Cloud folder</span>
+            <span class="row-sub">Point to your synced folder</span>
+          </div>
+          <div class="dir-picker">
+            <div class="dir-path" id="cloudPath">—</div>
+            <button class="btn-pick" id="pickCloud">Browse…</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Server ── -->
+      <div class="section">
+        <div class="section-label">Local Server</div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Port</span>
+            <span class="row-sub">Extension connects here</span>
+          </div>
+          <input class="num-input" type="number" id="serverPort" min="1024" max="65535" />
+        </div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Auth token</span>
+            <span class="row-sub">Leave blank to disable — optional</span>
+          </div>
+          <input class="text-input" type="password" id="authToken" placeholder="no token set" />
+        </div>
+
+        <div class="row">
+          <div class="row-label-stack">
+            <span class="row-label">Start on login</span>
+            <span class="row-sub">Launch with your system</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="startOnLogin" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+    </div>
+
+    <footer>
+      <div style="display:flex; gap: 8px; align-items: center;">
+        <button class="btn btn-danger" id="toggleServerBtn">Stop</button>
+        <span class="save-msg" id="saveMsg">Saved.</span>
+      </div>
+      <div style="display:flex; gap: 8px;">
+        <button class="btn btn-ghost" id="cancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="saveBtn">Save Settings</button>
+      </div>
+    </footer>
+
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

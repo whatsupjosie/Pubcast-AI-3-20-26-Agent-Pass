@@ -1,0 +1,43 @@
+{
+  "name": "code-collector",
+  "version": "1.0.0",
+  "description": "Capture code blocks from AI chat pages. Local-first. Cloud optional.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:mac":   "electron-builder --mac",
+    "build:win":   "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "electron-store": "^7.0.3"
+  },
+  "devDependencies": {
+    "electron":         "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId":       "ai.pubcast.code-collector",
+    "productName": "Code Collector",
+    "copyright":   "Copyright © 2026 Rear View Foresight LLC",
+    "directories": { "output": "dist" },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"],
+      "icon": "assets/icon.icns",
+      "extendInfo": { "LSUIElement": true }
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    }
+  }
+}
