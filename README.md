@@ -110,6 +110,16 @@ python3 tools/export_plain_files.py \
   --output-dir ~/Desktop/plain_exports
 ```
 
+## File scanning (local logs)
+
+New in this version:
+- select a local file from Settings → File Scanner and scan for code blocks in plain text conversation logs.
+- select a folder from Settings → File Scanner → Scan a folder to batch scan many files (up to 500 files, supported extensions: txt/md/json/js/ts/py/java/cpp/c/h/go/rs/sh/html/css/yaml/yml).
+- warnings for large files: files > 2MB show a soft warning; files > 10MB are skipped with a message.
+- security: only user directories (home, documents, downloads) allowed; binary files rejected; output sanitized to contain only code.
+
+This is a “no editor” path for quickly getting code snippets from dumped conversations.
+
 ---
 
 ## Supported sites

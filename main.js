@@ -1,24 +1,59 @@
 "use strict";
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } = require("electron");
-const path  = require("path");
-const fs    = require("fs");
-const http  = require("http");
+const path = require("path");
+const fs = require("fs");
+const http = require("http");
+const { execFile } = require("child_process");
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell } = require("electron");
 const Store = require("electron-store");
 
-// ─── Settings ─────────────────────────────────────────────────────────────────
+// CPU limiter state
+const CPU_LIMIT_PERCENT = 70;
+
+// Store instance - moved to top after imports
 const store = new Store({
   defaults: {
-    primaryDir:    path.join(app.getPath("documents"), "CodeCollector", "primary"),
-    archiveDir:    path.join(app.getPath("documents"), "CodeCollector", "archive"),
-    cloudDir:      "",
-    cloudEnabled:  false,
-    authToken:     "",
-    serverPort:    8765,
-    startOnLogin:  false,
-    saveToArchive: true,
+    primaryDir:      path.join(app.getPath("documents"), "CodeCollector", "primary"),
+    secondaryDir:    "",
+    archiveDir:      path.join(app.getPath("documents"), "CodeCollector", "archive"),
+    cloudDir:        "",
+    cloudEnabled:    false,
+    authToken:       "",
+    serverPort:      8765,
+    startOnLogin:    false,
+    saveToArchive:   true,
+    cpuLimiterEnabled: true,
   },
 });
+
+function getAppCpuUsage() {
+  const usage = process.cpuUsage();
+  const total = usage.user + usage.system;
+  const elapsed = process.uptime() * 1000000; // microseconds
+  return (total / elapsed) * 100; // percentage
+}
+
+function isCpuLimiterEnabled() {
+  return store.get("cpuLimiterEnabled", true); // default true
+}
+
+function checkCpuLimit() {
+  if (process.env.NO_CPU_LIMIT === '1') return;
+  if (!isCpuLimiterEnabled()) return;
+  const usage = getAppCpuUsage();
+  if (usage > CPU_LIMIT_PERCENT) {
+    throw new Error(`CPU usage too high (${usage.toFixed(1)}%). Limit is ${CPU_LIMIT_PERCENT}%. Wait for usage to drop or disable CPU limiter in settings.`);
+  }
+}
+
+async function throttleForCpu() {
+  if (!isCpuLimiterEnabled()) return;
+  const usage = getAppCpuUsage();
+  if (usage > CPU_LIMIT_PERCENT) {
+    // Wait 1 second to let CPU cool down
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let tray           = null;
@@ -26,9 +61,14 @@ let settingsWindow = null;
 let server         = null;
 let serverRunning  = false;
 let captureCount   = 0;
+let serverRetryCount = 0;
+const MAX_SERVER_RETRIES = 3;
 
 const ASSETS   = path.join(__dirname, "assets");
 const iconPath = (on) => path.join(ASSETS, on ? "icon-active.png" : "icon-inactive.png");
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+// Store initialization moved to top
 
 // ─── Filesystem helpers ───────────────────────────────────────────────────────
 function ensureDir(dir) {
@@ -45,6 +85,266 @@ function safeSegment(text, maxLen = 40) {
     .replace(/_+/g, "_")
     .replace(/^_|_$/g, "")
     .slice(0, maxLen) || "untitled";
+}
+
+// ─── Code file scanner helpers ───────────────────────────────────────────────
+function isLikelyCodeLine(line) {
+  const trimmed = (line || "").trim();
+  if (!trimmed) return false;
+
+  const codeTokens = [
+    "function", "def", "class", "import", "from", "const", "let", "var", "if", "else", "for", "while", "return", "=>", "#include", "package", "pub", "fn", "console.log"
+  ];
+  if (codeTokens.some((token) => trimmed.includes(token))) return true;
+
+  const symbols = (trimmed.match(/[{};=<>()[\]\\]/g) || []).length;
+  if (symbols >= 2) return true;
+
+  if (/^\s{2,}/.test(line) && trimmed.length > 20) return true;
+
+  return false;
+}
+
+function extractCodeBlocksFromText(text) {
+  if (typeof text !== "string") return [];
+
+  const blocks = [];
+  const lines  = text.split(/\r?\n/);
+
+  let fenced = false;
+  let fenceLang = "";
+  let current = [];
+
+  const flushCurrent = () => {
+    const joined = current.join("\n").trim();
+    if (joined.length >= 10) {
+      blocks.push({ language: fenceLang || "unknown", content: joined });
+    }
+    current = [];
+    fenceLang = "";
+  };
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^```\s*(\w*)/);
+    if (fenceMatch) {
+      if (fenced) {
+        flushCurrent();
+        fenced = false;
+      } else {
+        fenced = true;
+        fenceLang = fenceMatch[1] || "unknown";
+        current = [];
+      }
+      continue;
+    }
+
+    if (fenced) {
+      current.push(line);
+      continue;
+    }
+
+    if (isLikelyCodeLine(line)) {
+      current.push(line);
+      continue;
+    }
+
+    // non-code boundary
+    if (current.length) {
+      flushCurrent();
+    }
+  }
+
+  if (current.length) flushCurrent();
+
+  // Deduplicate similar blocks
+  return blocks
+    .map((b) => ({ language: b.language, content: b.content.trim() }))
+    .filter((b) => b.content.length > 0);
+}
+
+function isSafePath(filePath) {
+  if (process.env.TEST_MODE === "1") return true;
+  const absPath = path.resolve(filePath);
+  const homeDir = app.getPath("home");
+  const docsDir = app.getPath("documents");
+  const downloadsDir = app.getPath("downloads");
+
+  // Allow only user-controlled directories: home, documents, downloads, and subdirs
+  const allowedBases = [homeDir, docsDir, downloadsDir].map(p => path.resolve(p));
+  const isInAllowed = allowedBases.some(base => absPath.startsWith(base + path.sep) || absPath === base);
+
+  if (!isInAllowed) {
+    throw new Error("Path not allowed: only user directories (home, documents, downloads) are permitted.");
+  }
+
+  // Reject system files and sensitive paths
+  const forbidden = ["/etc", "/usr", "/var", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev"];
+  if (forbidden.some(f => absPath.startsWith(f))) {
+    throw new Error("Path not allowed: system directories are forbidden.");
+  }
+
+  return true;
+}
+
+function isTextFile(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(512);
+    const bytesRead = fs.readSync(fd, buffer, 0, 512, 0);
+
+    // Check for null bytes (binary indicator)
+    for (let i = 0; i < bytesRead; i++) {
+      if (buffer[i] === 0) return false;
+    }
+
+    // Check for high ratio of non-printable chars
+    let nonPrintable = 0;
+    for (let i = 0; i < bytesRead; i++) {
+      const c = buffer[i];
+      if (c < 32 && c !== 9 && c !== 10 && c !== 13) nonPrintable++; // tab, lf, cr ok
+    }
+    if (nonPrintable > bytesRead * 0.3) return false;
+
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close errors
+      }
+    }
+  }
+}
+
+function sanitizeCodeOutput(code) {
+  // Strip any potential HTML/JS tags or scripts
+  return (code || "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/javascript:/gi, "")
+    .replace(/on\w+="[^"]*"/gi, "")
+    .trim();
+}
+
+function scanFileForCode(filePath) {
+  checkCpuLimit();
+
+  if (!filePath || !fs.existsSync(filePath)) {
+    throw new Error("File not found");
+  }
+
+  isSafePath(filePath);
+
+  const stats = fs.statSync(filePath);
+  if (!stats.isFile()) {
+    throw new Error("Not a regular file");
+  }
+
+  if (!isTextFile(filePath)) {
+    throw new Error("File appears to be binary or non-text; only text files are allowed.");
+  }
+
+  if (stats.size > 10 * 1024 * 1024) {
+    throw new Error("File too large (max 10 MB)");
+  }
+
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    throw new Error(`Unable to read file: ${err.message}`);
+  }
+
+  const blocks = extractCodeBlocksFromText(raw)
+    .map((b) => ({ language: b.language, content: sanitizeCodeOutput(b.content) }));
+
+  const warning = stats.size > 2 * 1024 * 1024
+    ? `Large file: ${(stats.size / (1024 * 1024)).toFixed(2)} MB (scan may be slow).`
+    : "";
+
+  return {
+    filePath,
+    detected: blocks.length > 0,
+    count: blocks.length,
+    warning,
+    blocks,
+  };
+}
+
+async function scanFolderForCode(folderPath, maxFiles = 500) {
+  checkCpuLimit();
+
+  if (!folderPath || !fs.existsSync(folderPath)) {
+    throw new Error("Folder not found");
+  }
+
+  isSafePath(folderPath);
+
+  const stats = fs.statSync(folderPath);
+  if (!stats.isDirectory()) {
+    throw new Error("Not a directory");
+  }
+
+  const supportedExt = new Set(["txt","md","json","js","ts","py","java","cpp","c","h","go","rs","sh","html","css","yaml","yml"]);
+  const results = [];
+  let count = 0;
+
+  async function walk(dir) {
+    if (count >= maxFiles) return;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (count >= maxFiles) break;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        continue;
+      }
+      const ext = entry.name.split('.').pop().toLowerCase();
+      if (!supportedExt.has(ext)) continue;
+
+      count++;
+      try {
+        isSafePath(fullPath);
+        const entryStats = fs.statSync(fullPath);
+        if (entryStats.size > 10 * 1024 * 1024) {
+          results.push({ filePath: fullPath, skipped: true, reason: "Exceeds max file size (10 MB)" });
+          continue;
+        }
+        if (!isTextFile(fullPath)) {
+          results.push({ filePath: fullPath, skipped: true, reason: "Appears to be binary or non-text" });
+          continue;
+        }
+        const fileResult = scanFileForCode(fullPath);
+        results.push(fileResult);
+
+        // Throttle to prevent CPU overload between files
+        await throttleForCpu();
+      } catch (err) {
+        // Handle CPU limit errors specially
+        if (err.message && err.message.includes('CPU usage too high')) {
+          results.push({ filePath: fullPath, skipped: true, reason: "CPU limit reached - scan paused", errorType: "cpu_limit" });
+          // Don't continue scanning more files to prevent further CPU issues
+          break;
+        } else {
+          results.push({ filePath: fullPath, error: err.message, errorType: "scan_error" });
+        }
+      }
+    }
+  }
+
+  await walk(folderPath);
+
+  return {
+    folderPath,
+    scanned: count,
+    maxFiles,
+    results,
+    warning: count >= maxFiles ? `Reached max file scan limit (${maxFiles}); some files may not be scanned.` : "",
+  };
 }
 
 /**
@@ -66,7 +366,7 @@ function buildSmartFilename(payload, index = 1) {
     .replace(/\s*[-|–]\s*ChatGPT.*/i, "")
     .trim();
   let hostname = "unknown";
-  try { hostname = new URL(payload.source_url || "").hostname; } catch {}
+  try { hostname = new URL(payload.source_url || "").hostname; } catch (err) { /* ignore invalid URL */ }
   const siteSlug = safeSegment(rawTitle || hostname, 30);
 
   // Purpose: prefer detected_filename, then purpose_hint from first block, then entity name
@@ -111,18 +411,28 @@ function writePayload(dir, payload) {
 
 // ─── Routing ──────────────────────────────────────────────────────────────────
 function routePayload(payload) {
-  const target     = payload.target || "primary";
-  const primaryDir = store.get("primaryDir");
-  const archiveDir = store.get("archiveDir");
-  const cloudDir   = store.get("cloudDir");
-  const saved      = {};
+  const target       = payload.target || "primary";
+  const primaryDir   = store.get("primaryDir");
+  const secondaryDir = store.get("secondaryDir");
+  const archiveDir   = store.get("archiveDir");
+  const cloudDir     = store.get("cloudDir");
+  const saved        = {};
 
   const writeTo = (key, dir) => {
     if (dir) { try { saved[key] = writePayload(dir, payload); } catch (e) { console.error(`Failed to write ${key}:`, e.message); } }
   };
 
-  if (target === "primary" || target === "both")
+  if (!primaryDir) {
+    console.warn("primaryDir is not configured; using app documents path");
+    writeTo("primary", path.join(app.getPath("documents"), "CodeCollector", "primary"));
+  } else if (target === "primary" || target === "both") {
     writeTo("primary", primaryDir);
+  }
+
+  // Secondary location gets an unconditional mirror copy if set
+  if (secondaryDir) {
+    writeTo("secondary", secondaryDir);
+  }
 
   if (target === "archive" || target === "both" || (target === "primary" && store.get("saveToArchive")))
     writeTo("archive", archiveDir);
@@ -173,9 +483,17 @@ function createServer() {
         return;
       }
 
-      const saved_to = routePayload(payload);
-      captureCount++;
-      updateTrayMenu();
+      let saved_to;
+      try {
+        saved_to = routePayload(payload);
+        captureCount++;
+        updateTrayMenu();
+      } catch (err) {
+        console.error("Failed to save payload:", err.message);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to save payload", details: err.message }));
+        return;
+      }
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok", blocks: payload.blocks.length, saved_to }));
@@ -188,6 +506,7 @@ function startServer() {
   server = createServer();
   server.listen(store.get("serverPort"), "127.0.0.1", () => {
     serverRunning = true;
+    serverRetryCount = 0; // Reset retry count on successful start
     updateTrayIcon(true);
     updateTrayMenu();
   });
@@ -196,12 +515,18 @@ function startServer() {
     serverRunning = false;
     updateTrayIcon(false);
     updateTrayMenu();
-    // Auto-restart after 3s unless it's a port conflict
-    if (err.code !== "EADDRINUSE") {
-      console.log("Attempting server restart in 3s…");
-      setTimeout(startServer, 3000);
+
+    // Only auto-restart for recoverable errors and within retry limit
+    const recoverableErrors = ["EMFILE", "ENFILE", "ENOMEM", "ENOBUFS"];
+    if (recoverableErrors.includes(err.code) && serverRetryCount < MAX_SERVER_RETRIES) {
+      serverRetryCount++;
+      const delay = Math.min(1000 * Math.pow(2, serverRetryCount), 30000); // Exponential backoff, max 30s
+      console.log(`Attempting server restart ${serverRetryCount}/${MAX_SERVER_RETRIES} in ${delay/1000}s…`);
+      setTimeout(startServer, delay);
+    } else if (err.code === "EADDRINUSE") {
+      console.error(`Port ${store.get("serverPort")} is in use. Change the port in settings.`);
     } else {
-      console.error(`Port ${store.get("serverPort")} is in use. Change the port in Settings.`);
+      console.error(`Server failed to start after ${MAX_SERVER_RETRIES} attempts. Check system resources and settings.`);
     }
   });
 }
@@ -214,7 +539,7 @@ function stopServer() {
 // ─── Tray ─────────────────────────────────────────────────────────────────────
 function updateTrayIcon(on) {
   if (!tray) return;
-  try { tray.setImage(nativeImage.createFromPath(iconPath(on))); } catch {}
+  try { tray.setImage(nativeImage.createFromPath(iconPath(on))); } catch (err) { console.debug("Tray image load error", err.message); }
   tray.setToolTip(on ? `Code Collector — running · ${captureCount} captured` : "Code Collector — stopped");
 }
 
@@ -259,10 +584,28 @@ ipcMain.handle("get-settings",      () => store.store);
 ipcMain.handle("get-server-status", () => ({ running: serverRunning, port: store.get("serverPort"), captureCount }));
 ipcMain.handle("toggle-server",     () => { serverRunning ? stopServer() : startServer(); });
 
+let serverRestartTimeout = null;
 ipcMain.handle("save-settings", (_e, updated) => {
   const oldPort = store.get("serverPort");
+  const portChanged = updated.serverPort && updated.serverPort !== oldPort;
+
+  // Clear any pending restart
+  if (serverRestartTimeout) {
+    clearTimeout(serverRestartTimeout);
+    serverRestartTimeout = null;
+  }
+
   Object.entries(updated).forEach(([k, v]) => store.set(k, v));
-  if (updated.serverPort && updated.serverPort !== oldPort) { stopServer(); setTimeout(startServer, 600); }
+
+  if (portChanged) {
+    stopServer();
+    // Delay restart to ensure port is fully released
+    serverRestartTimeout = setTimeout(() => {
+      serverRestartTimeout = null;
+      startServer();
+    }, 1000);
+  }
+
   app.setLoginItemSettings({ openAtLogin: !!store.get("startOnLogin") });
   return { ok: true };
 });
@@ -273,6 +616,40 @@ ipcMain.handle("pick-directory", async (_e, key) => {
     defaultPath: store.get(key) || app.getPath("documents"),
   });
   return r.canceled ? null : (r.filePaths[0] || null);
+});
+
+ipcMain.handle("pick-file", async () => {
+  const r = await dialog.showOpenDialog(settingsWindow, {
+    properties: ["openFile"],
+    filters: [
+      { name: "Text/Code files", extensions: ["txt", "md", "json", "js", "ts", "py", "java", "cpp", "c", "h", "go", "rs", "sh", "html", "css", "yaml", "yml"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  return r.canceled ? null : (r.filePaths[0] || null);
+});
+
+ipcMain.handle("pick-folder", async () => {
+  const r = await dialog.showOpenDialog(settingsWindow, {
+    properties: ["openDirectory"],
+  });
+  return r.canceled ? null : (r.filePaths[0] || null);
+});
+
+ipcMain.handle("scan-file", async (_e, filePath) => {
+  try {
+    return scanFileForCode(filePath);
+  } catch (err) {
+    return { error: err.message, errorType: "scan_error" };
+  }
+});
+
+ipcMain.handle("scan-folder", async (_e, folderPath) => {
+  try {
+    return await scanFolderForCode(folderPath);
+  } catch (err) {
+    return { error: err.message, errorType: "scan_error" };
+  }
 });
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
@@ -549,4 +926,9 @@ module.exports = {
   handleCollectConversation,
   handleGetSessionContext,
   handleGetAllSessions,
+  scanFileForCode,
+  scanFolderForCode,
+  buildSmartFilename,
+  routePayload,
+  isTextFile,
 };
