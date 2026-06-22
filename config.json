@@ -1,0 +1,12 @@
+{
+	"primaryDir": "/workspaces/Pubcast-AI-3-20-26-Agent-Pass/tmp_docs/CodeCollector/primary",
+	"secondaryDir": "",
+	"archiveDir": "/workspaces/Pubcast-AI-3-20-26-Agent-Pass/tmp_docs/CodeCollector/archive",
+	"cloudDir": "",
+	"cloudEnabled": false,
+	"authToken": "",
+	"serverPort": 8765,
+	"startOnLogin": false,
+	"saveToArchive": true,
+	"cpuLimiterEnabled": true
+}
